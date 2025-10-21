@@ -1,0 +1,207 @@
+# pump_screener.py
+"""
+Multi-exchange Pump/Dump Screener for Telegram
+Exchanges: BINANCE, BYBIT, BINGX, MEXC, GATE.IO
+Signals when 1m/5m % change exceeds thresholds with a basic 5m 
+quote-volume filter and cooldown.
+"""
+
+import time
+from datetime import datetime, timezone
+import requests
+import ccxt
+
+# ------------- EDIT THESE TWO LINES -------------
+TELEGRAM_TOKEN   = "PASTE_YOUR_BOTFATHER_TOKEN_HERE"
+TELEGRAM_CHAT_ID = "-1001234567890"   # group id must start with -100..., 
+user id is just digits
+# -----------------------------------------------
+
+# Scan parameters
+LOOP_SECONDS       = 20
+USE_USDT_ONLY      = True
+THRESH_1M          = 3.5
+THRESH_5M          = 6.0
+MIN_QUOTE_VOL_5M   = 20000      # USD approx over last 5 1m candles
+COOLDOWN_SECONDS   = 900
+ENABLED_EXCHANGES  = ["binance", "bybit", "bingx", "mexc", "gateio"]
+MAX_SYMBOLS_PER_EX = 80         # safety cap
+
+def utc_hms() -> str:
+    return datetime.now(timezone.utc).strftime("%H:%M:%S")
+
+def pct(a: float, b: float) -> float:
+    try:
+        return (a / b - 1.0) * 100.0
+    except Exception:
+        return 0.0
+
+def tg_send(text: str) -> dict:
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    try:
+        r = requests.post(url, data=payload, timeout=10)
+        if r.status_code != 200:
+            print("[TG ERROR]", r.text)
+        return r.json()
+    except Exception as e:
+        print("[TG EXC]", e)
+        return {"ok": False, "error": str(e)}
+
+def tg_selfcheck() -> bool:
+    try:
+        me = 
+requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe", 
+timeout=10).json()
+        print("[CHECK getMe]", me)
+        if not me.get("ok"):
+            return False
+        sm = tg_send("Screener self-check")
+        print("[CHECK sendMessage]", sm)
+        return bool(sm.get("ok"))
+    except Exception as e:
+        print("[CHECK EXC]", e)
+        return False
+
+def estimate_quote_volume(ohlcv_rows) -> float:
+    if not ohlcv_rows:
+        return 0.0
+    closes = [r[4] for r in ohlcv_rows if r[4] is not None]
+    vols   = [r[5] for r in ohlcv_rows if len(r) > 5 and r[5] is not None]
+    if not closes or not vols:
+        return 0.0
+    return (closes[-1] or 0.0) * sum(vols)
+
+def get_symbols_usdt(ex) -> list:
+    markets = ex.load_markets()
+    symbols = []
+    for s, m in markets.items():
+        if not m.get("active", True):
+            continue
+        if USE_USDT_ONLY and "USDT" not in s.upper():
+            continue
+        u = s.upper()
+        if any(x in u for x in ["UP/", "DOWN/", "BULL/", "BEAR/", "3S/", 
+"3L/", "5S/", "5L/"]):
+            continue
+        if "/USDT" in s or "USDT/" in s:
+            symbols.append(s)
+    return sorted(symbols)
+
+def fetch_ohlcv_safe(ex, symbol: str, timeframe: str, limit: int):
+    try:
+        return ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    except Exception:
+        try:
+            ex.load_markets(True)
+            return ex.fetch_ohlcv(symbol, timeframe=timeframe, 
+limit=limit)
+        except Exception:
+            return []
+
+def compute_moves(ex, symbol: str):
+    rows = fetch_ohlcv_safe(ex, symbol, "1m", 6)
+    if len(rows) < 6:
+        return None
+    c_now = rows[-1][4]
+    c_1m  = rows[-2][4]
+    c_5m  = rows[-6][4]
+    move_1m = pct(c_now, c_1m)
+    move_5m = pct(c_now, c_5m)
+    qv5 = estimate_quote_volume(rows[-5:])
+    return {"now": c_now, "m1": move_1m, "m5": move_5m, "qv5": qv5}
+
+class Screener:
+    def __init__(self):
+        self.ex = {}
+        self.cache = {}
+        self.cd = {}   # cooldown dict
+
+    def build(self):
+        if "binance" in ENABLED_EXCHANGES:
+            self.ex["binance"] = ccxt.binance({"options": {"defaultType": 
+"spot"}})
+        if "bybit" in ENABLED_EXCHANGES:
+            self.ex["bybit"] = ccxt.bybit()
+        if "bingx" in ENABLED_EXCHANGES:
+            self.ex["bingx"] = ccxt.bingx()
+        if "mexc" in ENABLED_EXCHANGES:
+            self.ex["mexc"] = ccxt.mexc()
+        if "gateio" in ENABLED_EXCHANGES:
+            self.ex["gateio"] = ccxt.gateio()
+
+    def allowed(self, key: str) -> bool:
+        return time.time() >= self.cd.get(key, 0.0)
+
+    def set_cd(self, key: str) -> None:
+        self.cd[key] = time.time() + COOLDOWN_SECONDS
+
+    def run_once(self):
+        for name, ex in self.ex.items():
+            syms = self.cache.get(name)
+            if not syms:
+                try:
+                    syms = get_symbols_usdt(ex)
+                    self.cache[name] = syms
+                    print(f"[{utc_hms()}] {name}: loaded {len(syms)} 
+symbols")
+                except Exception as e:
+                    print(f"[{utc_hms()}] {name}: load_markets error:", e)
+                    continue
+
+            for s in syms[:MAX_SYMBOLS_PER_EX]:
+                info = compute_moves(ex, s)
+                if not info:
+                    continue
+                if info["qv5"] < MIN_QUOTE_VOL_5M:
+                    continue
+
+                if abs(info["m1"]) >= THRESH_1M or abs(info["m5"]) >= 
+THRESH_5M:
+                    magnitude = info["m1"] if abs(info["m1"]) >= 
+abs(info["m5"]) else info["m5"]
+                    direction = "Pump" if magnitude > 0 else "Dump"
+                    key = f"{name}:{s}:{direction}"
+                    if not self.allowed(key):
+                        continue
+                    self.set_cd(key)
+
+                    sym = s.split("/")[0]
+                    msg = (
+                        f"{direction} {sym} on {name.capitalize()}\n"
+                        f"Move: {magnitude:+.2f}%  (1m: {info['m1']:+.2f}% 
+| 5m: {info['m5']:+.2f}%)\n"
+                        f"Approx 5m quote vol: ${info['qv5']:.0f}\n"
+                        f"UTC {utc_hms()}"
+                    )
+                    print(f"[{utc_hms()}] ALERT {name} {s} {direction} 
+{magnitude:+.2f}%")
+                    tg_send(msg)
+
+if __name__ == "__main__":
+    # Telegram self-check first (clear diagnostics)
+    ok = tg_selfcheck()
+    if not ok:
+        print("\nFix TELEGRAM_TOKEN / TELEGRAM_CHAT_ID (see [CHECK ...] 
+lines above).")
+        raise SystemExit(1)
+
+    s = Screener()
+    s.build()
+    tg_send("Screener started.")
+    print("[RUN] Screener started; press Ctrl+C to stop.")
+    while True:
+        try:
+            s.run_once()
+        except KeyboardInterrupt:
+            print("\n[STOP] Bye.")
+            break
+        except Exception as e:
+            print("[ERROR]", e)
+        time.sleep(LOOP_SECONDS)
+
