@@ -24,8 +24,8 @@ ENABLED_EXCHANGES   = ["binance", "bybit", "bingx", "mexc", "gateio"]
 MAX_SYMBOLS_PER_EX  = 300          # сканируем первые N символов
 
 # Фильтр шума и усиленный стиль
-MIN_CHANGE_PCT      = 5.0         # не шлём сигналы меньше 5%
-MEGA_CHANGE_PCT     = 10.0        # «мега»-стиль для >10%
+MIN_CHANGE_PCT      = 3.0         # не шлём сигналы меньше 5%
+MEGA_CHANGE_PCT     = 9.0        # «мега»-стиль для >10%
 
 # =================== Утилиты ===================
 def utc_hms() -> str:
