@@ -18,10 +18,10 @@ LOOP_SECONDS        = 20          # пауза между проходами
 USE_USDT_ONLY       = True        # только USDT-пары
 THRESH_1M           = 3.5         # порог инфо по 1m (оставляем для справки)
 THRESH_5M           = 6.0         # порог инфо по 5m (оставляем для справки)
-MIN_QUOTE_VOL_5M    = 20000       # минимальный котируемый объём за ~5m (в $)
+MIN_QUOTE_VOL_5M    = 10000       # минимальный котируемый объём за ~5m (в $)
 COOLDOWN_SECONDS    = 900         # анти-спам на тикер/направление
 ENABLED_EXCHANGES   = ["binance", "bybit", "bingx", "mexc", "gateio"]
-MAX_SYMBOLS_PER_EX  = 80          # сканируем первые N символов
+MAX_SYMBOLS_PER_EX  = 300          # сканируем первые N символов
 
 # Фильтр шума и усиленный стиль
 MIN_CHANGE_PCT      = 5.0         # не шлём сигналы меньше 5%
